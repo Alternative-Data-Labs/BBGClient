@@ -1,0 +1,877 @@
+import plotly
+import plotly.graph_objs as go
+import pandas as pd
+from scipy import stats
+import datetime as dt
+from dateutil.relativedelta import relativedelta
+import numpy as np
+
+def get_prices(Ticker, StartDate, EndDate):
+
+    index = pd.MultiIndex.from_product(
+        [["SPY","WMT"], pd.date_range("2023-01-01","2025-01-10", freq="W")],
+        names=["Id","Date"]
+    )
+
+    prices = pd.DataFrame(
+        {"Close": np.random.rand(len(index))*100 + 300},
+        index=index
+    ).sort_index()
+    
+    return prices
+
+
+class spread(object) :
+    
+    def __init__(self,
+                 Ticker1 = None,
+                 Ticker2 = None,
+                 StartDate = None,
+                 EndDate = None,
+                 custom_DataFrame = None,
+                 custom_name1 = None,
+                 custom_name2 = None,
+                 custom_type = 'Close',
+                 StartValue = 100,
+                 Rolling_window = 70) :
+        '''
+        Args :
+            Ticker1, Ticker2 :
+                Exchange Tickers to do spread analysis from Ticker1 to Ticker2.
+           
+            StartDate, EndDate :
+                Time range.
+              
+            custom_DataFrame :
+                the port to input the user customed time series.
+                
+            custom_name1, custom_name2 :
+                Two id as the ticker1 and ticker2. The two columns' name in custom_DataFrame should be the exactly same.
+                
+            custom_type :
+                The type of time series inputted, available for 'Close', 'CumReturn'(Cumulative Return starting at the first date of time series generally.)
+                
+            StartValue :
+                The dollar value at the start point of spread analysis.
+               
+            Corr_window :
+                The rolling window of correlations.
+                
+        '''
+        self.custom_name1 = custom_name1
+        self.custom_name2 = custom_name2
+        self.custom_type = custom_type
+        self.custom_DataFrame = custom_DataFrame
+        
+        if Ticker1 is not None and Ticker2 is not None :
+            self.Ticker1 = Ticker1.upper()
+            self.Ticker2 = Ticker2.upper()
+
+            if EndDate is None :
+                self.EndDate = dt.date.today().strftime('%Y-%m-%d')
+            else :
+                self.EndDate = pd.to_datetime(EndDate).strftime('%Y-%m-%d')
+                
+            if StartDate is None :
+                self.StartDate = (pd.to_datetime(self.EndDate) - relativedelta(years = 1)).strftime('%Y-%m-%d')
+            else :
+                self.StartDate = pd.to_datetime(StartDate).strftime('%Y-%m-%d')
+        elif custom_DataFrame is not None :
+            self.StartDate = pd.to_datetime(custom_DataFrame.index[0]).strftime('%Y-%m-%d')
+            self.StartDate = pd.to_datetime(custom_DataFrame.index[-1]).strftime('%Y-%m-%d')
+
+        self.StartValue = StartValue
+        # since the data is trading calendar, then the window need to convert
+        self.Rolling_window = Rolling_window
+    
+    
+    def plot(self,
+             help = False,
+             height = 1200,
+             return_ = None) :
+        '''
+        Desc :
+            To plot the Spread Analysis.
+            
+        Args :
+            help_ :
+                False to remove the line explainer in the second plot.
+            
+            height :
+                The pixel height of the whole plot.
+                
+            return_ :
+                Choose what data want to be returned, available for 'fig', 'data', None.
+        
+        Example :
+          spread(Ticker1 ='SPY', Ticker2 = 'MDY').plot()
+            
+          spread(
+                Ticker1 ='SPY', 
+                Ticker2 = 'MDY', 
+                StartDate ='2016-10-04', 
+                EndDate ='2017-10-04',
+                Rolling_window =120
+                ).plot(
+                    help = False,
+                    return_ = 'data')
+            
+            # input custom two time seires in a DataFrame to plot.
+            # Check the following DataFrame as input data Sample
+            prices(Ticker = ['SPY', 'MDY'], StartDate = '2017-01-01', EndDate = '2017-02-01').Close.unstack().T
+            
+            # input the sample data as a custom data
+            spread(
+                custom_DataFrame(Sample),
+                custom_name1 = 'SPY',
+                custom_name2 = 'MDY',
+                custom_type = 'Close'
+                ).plot()
+            
+        '''
+        self.help = help
+        
+        # config
+        self.line_color_ticker1 = 'rgb(22, 96, 167)' # blue
+        self.line_color_ticker2 = 'rgb(255,165,0)' # orange
+        self.corr_color = 'rgb(120, 184, 156)' # wasabi green
+        self.height = height
+        
+        if self.custom_DataFrame is None :
+            # retrieve prices data
+            tickers = [self.Ticker1, self.Ticker2]
+            self.prices = get_prices(
+                Ticker = tickers,
+                StartDate = self.StartDate,
+                EndDate = self.EndDate)
+        else :
+            self.Ticker1, self.Ticker2 = self.custom_name1, self.custom_name2
+            custom_type_dict = dict(close = 'Close', cumreturn = 'CumReturn')
+            self.custom_type = custom_type_dict[self.custom_type.lower()]
+            self.prices = pd.DataFrame(self.custom_DataFrame[[self.custom_name1, self.custom_name2]].dropna().stack().swaplevel().sortlevel(0),
+                                       columns = [self.custom_type])
+            self.prices = self.prices.reset_index(drop = False)
+            self.prices.columns = ['Id', 'Date', custom_type_dict[self.custom_type.lower()]]
+            self.prices = self.prices.set_index(['Id', 'Date'])
+            
+            
+        
+        # generate base plot for dollar spread
+        self.fig = dict(data = [])
+        self.fig['layout'] = dict(
+            title = '<b>Spread Analysis</b> : <b>' + self.Ticker1 + '</b> to <b>' + self.Ticker2 + '</b> <sub>' + self.prices.index.get_level_values(level = 1).min().strftime('%Y-%m-%d') + ' to ' + self.prices.index.get_level_values(level = 1).max().strftime('%Y-%m-%d') + '</sub>',
+            margin = dict(l = 60, r = 30, t = 0),
+            height = self.height,
+            annotations = [])
+        
+        self.intersection_date = self.prices.index.get_level_values(level=1)[self.prices.index.get_level_values(level=1).duplicated()]
+        self.prices = self.prices.loc[self.prices.index.get_level_values(level=1).isin(self.intersection_date)]
+        
+        # generate plot 1 - value spread
+        spread._generate_spread_value(self)
+        spread._generate_spread_value_describe(self)
+        
+        # generate plot 2 - normailized spread
+        spread._generate_spread_norm(self)
+        spread._generate_spread_norm_dist(self)
+        
+        # Check rolling window
+        if self.Rolling_window >= len(self.CumReturn_norm) * 0.75 :
+            self.Rolling_min_period = int(len(self.CumReturn_norm) /4)
+        else :
+            self.Rolling_min_period = None
+            
+        # generate plot 3 - rolling relative volatility
+        spread._generate_relative_vol(self)
+        spread._generate_relative_vol_dist(self)
+        
+        # generate plot 4 - spread rolling correlation
+        spread._generate_spread_corr(self)
+        spread._generate_spread_corr_dist(self)
+        
+        # generate plot 5 - rolling beta
+        spread._generate_beta(self)
+        spread._generate_beta_dist(self)
+        
+        # generate plot 6 - spread regression
+        spread._generate_spread_regression(self)
+        spread._generate_spread_regression_describe(self)
+        
+        # set fig for legned
+        self.fig['layout']['legend'] = dict(
+            traceorder = 'grouped',
+            x = 0.885,
+            y = 1.04,
+            font = dict(size = 11),
+            )
+        
+        # define the axis domain for 4 plots.
+        ## to check the axis stucture, there is a Glimpse by checking the content of these two following function.
+        spread._define_yaxis_domain(self)
+        spread._define_xaxis_domain(self)
+
+        plotly.offline.iplot(self.fig, filename = 'plot_spread')
+        
+        if return_ == 'fig' :
+            return self.fig
+        elif return_ == 'data' :
+            return self.prices
+        else :
+            pass
+    
+    def _generate_spread_value(self) :
+        # cumulative return
+        if self.custom_type == 'CumReturn' :
+            self.prices['CumReturn'] = self.prices.CumReturn / self.prices.CumReturn.groupby(level = 0).transform('first')
+        else :
+            self.prices['CumReturn'] = self.prices.Close / self.prices.Close.groupby(level = 0).transform('first')
+        self.prices['CumReturn_$'] = self.prices.CumReturn * self.StartValue
+        
+        # add value return data
+        self.fig['data'].append(
+            go.Scatter(
+                x = self.prices.index.get_level_values(level=1),
+                y = self.prices['CumReturn_$'].loc[self.prices.index.get_level_values(level = 0) == self.Ticker1],
+                name = self.Ticker1,
+                yaxis = 'y1',
+                xaxis = 'x1',
+                showlegend = True,
+                line = dict(color = self.line_color_ticker1)
+                )
+            )
+        self.fig['data'].append(
+            go.Scatter(
+                x = self.prices.index.get_level_values(level=1),
+                y = self.prices['CumReturn_$'].loc[self.prices.index.get_level_values(level = 0) == self.Ticker2],
+                name = self.Ticker2,
+                yaxis = 'y1',
+                xaxis = 'x1',
+                showlegend = True,
+                fill = 'tonexty',
+                line = dict(color = self.line_color_ticker2)
+                )
+            )
+
+        # value return layout
+        self.fig['layout'].update( 
+            dict(
+                xaxis = dict(
+                    title = 'Date',
+                    zeroline = True,
+                    domain = [0,0.9]
+                    ),
+                yaxis = dict(
+                    title = 'Value',
+                    zeroline = False,
+                    anchor = 'x',
+                    tickprefix = '$'
+                    )
+                )
+            )
+
+        # marker highest and lowest points in Dollar Return plot        
+        low = pd.DataFrame(self.prices['CumReturn_$'].groupby(level=0).min())
+        low['sig'] = 'Low'
+        high = pd.DataFrame(self.prices['CumReturn_$'].groupby(level=0).max())
+        high['sig'] = 'High'
+        
+        HnL = pd.concat([low, high]).reset_index(drop=False)        
+        
+        HnL = pd.merge(HnL,
+                       self.prices['CumReturn_$'].reset_index(drop = False),
+                       on = ['Id', 'CumReturn_$'])
+        
+        if self.help :
+            # annotations for High and Low
+            for ix, info in HnL.iterrows() :
+                new_annotations = dict(
+                        x = info.Date,
+                        y = info['CumReturn_$'],
+                        xref = 'x',
+                        yref = 'y',
+                        text = '%s %s:%.2f' % (info.Id, info.sig, info['CumReturn_$']),
+                        showarrow = True,
+                        arrowhead = 2,
+                        arrowsize = 1,
+                        arrowwidth = 0.8,
+                        font = dict(size = 10, color = 'rgb(148, 103, 189)')
+                        )
+                if info.sig == 'Low' :
+                    new_annotations['ay'] = 30
+                else :
+                    new_annotations['ay'] = -30
+                self.fig['layout']['annotations'].append(new_annotations)
+    
+    def _generate_spread_value_describe(self) :
+        self.fig['layout']['xaxis3'] = dict(
+            visible = False,
+            autorange = False,
+            fixedrange = True,
+            zeroline = False,
+            range = [-1, 1],
+            showgrid = False
+            )
+        self.fig['layout']['yaxis7'] = dict(
+            anchor = 'x3',
+            visible = False,
+            autorange = False,
+            fixedrange = True,
+            range = [-1, 1],
+            showgrid = False
+            )
+        
+        _spread = self.prices['CumReturn_$'].unstack(level=0)
+        _spread = _spread[self.Ticker1] - _spread[self.Ticker2]
+        _spread_stats = _spread.describe()
+        SpreadLast = _spread.iloc[-1]
+        
+        new_annotation = dict(
+            yref = 'y7',
+            x = 0, y = 0,
+            showarrow = False,
+            xref = 'x3',
+            text = "<b>Spread :          </b><br><b>Last</b>   %.2f<br><b>Mean</b>   %.2f<br><b>Std</b>    %.2f<br><b>Min</b>    %.2f<br><b>25%%</b>    %.2f<br><b>50%%</b>    %.2f<br><b>75%%</b>    %.2f<br><b>Max</b>    %.2f" % tuple([SpreadLast] + _spread_stats[1:].tolist())
+            )
+        self.fig['layout']['annotations'].append(new_annotation)
+
+    
+    def _generate_spread_norm(self) :
+        self.CumReturn_norm = self.prices.CumReturn.loc[self.prices.index.get_level_values(level=0) == self.Ticker1].unstack(level=0)[self.Ticker1] \
+                             - self.prices.CumReturn.loc[self.prices.index.get_level_values(level=0) == self.Ticker2].unstack(level=0)[self.Ticker2] \
+                             + 1
+        # plot for Normalized return
+        # Normalized return layout
+        self.fig['layout']['yaxis2'] = dict(
+            title = 'Norm as of ' + self.prices.iloc[0].name[1].strftime('%D') + ' Close',
+            titlefont = dict(size = 13),
+            anchor = 'x',
+            ticksuffix = '%'
+            )
+        # Normailized return data
+        self.fig['data'].append( ## ticker1 line
+            go.Scatter(
+                x = self.CumReturn_norm.index,
+                y = [100] * len(self.CumReturn_norm),
+                line = dict(
+                    color = self.line_color_ticker1
+                    ),
+                hoverinfo = 'none',
+                showlegend = False,
+                yaxis = 'y2')
+            )
+        self.fig['data'].append( ## ticker2 line
+            go.Scatter(
+                x = self.CumReturn_norm.index,
+                y = self.CumReturn_norm *100,
+                name = 'Normalized as of ' + self.prices.iloc[0].name[1].strftime('%Y-%m-%d')  + ' Close',
+                text = ['Spread: %.2f%%' % x for x in (self.CumReturn_norm *100 -100)],
+                hoverinfo = 'x+text',
+                yaxis = 'y2',
+                showlegend = False,
+                line = dict(color = self.line_color_ticker2),
+                fill = 'tonexty'
+                )
+            )
+        self.fig['data'].append( ## average line
+            go.Scatter(
+                x = self.CumReturn_norm.index,
+                y = [self.CumReturn_norm.mean() *100] * len(self.CumReturn_norm),
+                line = dict(
+                    color = 'rgb(148, 103, 189)',
+                    dash = 'dash'
+                    ),
+                hoverinfo = 'none',
+                name = 'Mean',
+                showlegend = False,
+                yaxis = 'y2'
+                )
+            )
+        
+        if self.help :
+            # marker highest and lowest points in Normalized Return plot
+            new_annotation = spread._generate_new_annotation(yaxis = 'y2')
+            # High
+            new_annotation.update(
+                dict(
+                    x = self.CumReturn_norm[self.CumReturn_norm == self.CumReturn_norm.max()].index[0],
+                    y = self.CumReturn_norm.max() *100,
+                    text = 'High:%.2f%%' % ((self.CumReturn_norm.max()-1) *100),
+                    ay = -20
+                    )
+                )
+            self.fig['layout']['annotations'].append(new_annotation)
+            new_annotation = spread._generate_new_annotation(yaxis = 'y2')
+            # Low
+            new_annotation.update(
+                dict(
+                    x = self.CumReturn_norm[self.CumReturn_norm == self.CumReturn_norm.min()].index[0],
+                    y = self.CumReturn_norm.min() *100,
+                    text = 'Low:%.2f%%' % ((self.CumReturn_norm.min()-1) *100),
+                    ay = 20
+                    )
+                )
+            self.fig['layout']['annotations'].append(new_annotation)
+            new_annotation = spread._generate_new_annotation(yaxis = 'y2')
+            # Mean
+            new_annotation.update(
+                dict(y = self.CumReturn_norm.mean() *100,
+                     text = 'Mean:%.2f%%' % ((self.CumReturn_norm.mean()-1) *100))
+                )
+            # adjust the mean annotation location
+            if self.CumReturn_norm.mean() >= 1 :
+                new_annotation.update(
+                    dict(ay = -20,
+                         x = self.CumReturn_norm[self.CumReturn_norm == self.CumReturn_norm.min()].index[0])
+                    )
+            else :
+                new_annotation.update(
+                    dict(ay = 20,
+                         x = self.CumReturn_norm[self.CumReturn_norm == self.CumReturn_norm.max()].index[0])
+                    )
+            self.fig['layout']['annotations'].append(new_annotation)
+    
+    
+    def _generate_spread_norm_dist(self) :
+        self.fig['layout']['xaxis4'] = dict(anchor = 'y2')
+
+        self.fig['data'].append(
+            go.Histogram(
+                y = self.CumReturn_norm *100, # not times StartValue, it's to make into percentage
+                xaxis = 'x4',
+                yaxis = 'y2',
+                opacity = 0.5,
+                marker = dict(color= self.line_color_ticker2),
+                showlegend = False,
+                name = 'Norm Dist'
+                )
+            )
+
+
+    def _generate_relative_vol(self) :
+        # Rolling Relative Volatility
+        ## daily return
+        if 'Close' in self.prices.columns :
+            self.prices['Return'] = self.prices.Close.groupby(level =0).pct_change(periods =1) 
+        else :
+            self.prices['Return'] = self.prices.CumReturn.groupby(level =0).pct_change(periods =1)
+            
+        #self.prices['Rolling_Vol'] = self.prices.Return.groupby(level =0).rolling(window = self.Rolling_window, min_periods= self.Rolling_min_period).std()
+        self.prices['Rolling_Vol'] = self.prices.Return.groupby(level =0).rolling(window = self.Rolling_window, min_periods= self.Rolling_min_period).std().reset_index(level=0, drop=True)
+        
+        ticker1_vol = self.prices.Return.loc[
+            self.prices.index.get_level_values(level=0) == self.Ticker1
+            ].rolling(
+                window = self.Rolling_window,
+                min_periods = self.Rolling_min_period).std()
+        ticker2_vol = self.prices.Return.loc[
+            self.prices.index.get_level_values(level=0) == self.Ticker2
+            ].rolling(
+                window = self.Rolling_window,
+                min_periods = self.Rolling_min_period).std()
+            
+        self.Relative_Vol = ticker1_vol.reset_index(level=0, drop = True) / ticker2_vol.reset_index(level=0, drop = True)
+        
+        # create yaxis
+        self.fig['layout']['yaxis3'] = dict(
+            title = 'Rolling Relative Vol',
+            titlefont = dict(size = 11),
+            anchor = 'x',
+            rangemode = 'tozero',
+            zeroline = True
+            )
+        
+        # add data
+        self.fig['data'].append(
+            go.Scatter(
+                name = 'Relative Vol',
+                x = self.Relative_Vol.index,
+                y = self.Relative_Vol,
+                yaxis = 'y3',
+                line = dict(color = self.corr_color),
+                fill = 'tozeroy',
+                showlegend = False
+                )
+            )
+        
+        if self.help :
+            # marker highest and lowest points
+            new_annotation = spread._generate_new_annotation(yaxis = 'y3')
+            # High
+            new_annotation.update(
+                dict(
+                    x = self.Relative_Vol[self.Relative_Vol == self.Relative_Vol.max()].index[0],
+                    y = self.Relative_Vol.max(),
+                    text = 'High:%.2f' % (self.Relative_Vol.max()),
+                    ay = -20
+                    )
+                )
+            self.fig['layout']['annotations'].append(new_annotation)
+            
+            new_annotation = spread._generate_new_annotation(yaxis = 'y3')
+            # Low
+            new_annotation.update(
+                dict(
+                    x = self.Relative_Vol[self.Relative_Vol == self.Relative_Vol.min()].index[0],
+                    y = self.Relative_Vol.min(),
+                    text = 'Low:%.2f' % (self.Relative_Vol.min()),
+                    ay = 20
+                    )
+                )
+            self.fig['layout']['annotations'].append(new_annotation)
+
+
+    def _generate_relative_vol_dist(self) :     
+        self.fig['layout']['xaxis5'] = dict(anchor = 'y3')
+        
+        self.fig['data'].append(
+            go.Histogram(
+                y = self.Relative_Vol, # not times StartValue, it's to make into percentage
+                xaxis = 'x5',
+                yaxis = 'y3',
+                opacity = 0.5,
+                marker = dict(color= self.corr_color),
+                showlegend = False,
+                name = 'Vol Dist'
+                )
+            )
+    
+    def _generate_spread_corr(self) :
+        # Plot for correlation
+        ## calculate
+        
+        # wide form returns for both tickers
+        ret_wide = self.prices['Return'].unstack(level=0)
+
+        # rolling correlation between the two tickers
+        self.Return_corr = (
+            ret_wide[self.Ticker1]
+            .rolling(window=self.Rolling_window,
+                     min_periods=self.Rolling_min_period)
+            .corr(ret_wide[self.Ticker2])
+        )
+        #self.Return_corr = pd.rolling_corr(
+        #    arg1 = self.prices.Return.unstack(level=0)[self.Ticker1],
+        #    arg2 = self.prices.Return.unstack(level=0)[self.Ticker2], 
+        #    window = self.Rolling_window,
+        #    min_periods = self.Rolling_min_period)
+        # add data      
+        self.fig['data'].append(
+            go.Scatter(
+                x = self.Return_corr.index,
+                y = self.Return_corr,
+                name = 'Correlation',
+                yaxis = 'y4',
+                showlegend = False,
+                line = dict(color = self.corr_color),
+                fill = 'tozeroy'
+                )
+            )
+        # add layout
+        self.fig['layout']['yaxis4'] = dict(
+            title = 'Rolling Correlation',
+            titlefont = dict(size = 11),
+            rangemode = 'tozero',
+            zeroline = True
+            )
+        
+        _min = self.Return_corr.min()
+        _max = self.Return_corr.max()
+        
+        if _min < 0 :
+            _range = [-1]
+        else :
+            _range = [0]
+        if _max > 0 :
+            _range.append(1)
+        else :
+            _range.append(0)
+            
+        self.fig['layout']['yaxis4']['range'] = _range
+
+        if self.help :
+            # add High and low Markers
+            new_annotation = spread._generate_new_annotation(yaxis = 'y4')
+            # High
+            new_annotation.update(
+                dict(
+                    x = self.Return_corr[self.Return_corr == self.Return_corr.max()].index[0],
+                    y = self.Return_corr.max(),
+                    text = 'High:%.2f' % (self.Return_corr.max()),
+                    ay = -20
+                    )
+                )
+            self.fig['layout']['annotations'].append(new_annotation)
+            new_annotation = spread._generate_new_annotation(yaxis = 'y4')
+            # Low
+            new_annotation.update(
+                dict(
+                    x = self.Return_corr[self.Return_corr == self.Return_corr.min()].index[0],
+                    y = self.Return_corr.min(),
+                    text = 'Low:%.2f' % (self.Return_corr.min()),
+                    ay = 20
+                    )
+                )
+            self.fig['layout']['annotations'].append(new_annotation)
+        
+    
+    def _generate_spread_corr_dist(self) :
+        self.fig['layout']['xaxis6'] = dict(anchor = 'y4')
+        
+        self.fig['data'].append(
+            go.Histogram(
+                y = self.Return_corr,
+                xaxis = 'x6',
+                yaxis = 'y4',
+                opacity = 0.5,
+                marker = dict(color= self.corr_color),
+                showlegend = False,
+                name = 'Corr Dist'
+                )
+            )
+
+    def _generate_beta(self) :
+        # calculate
+        self.Rolling_Beta = self.Return_corr * self.Relative_Vol
+        # create yaxis
+        self.fig['layout']['yaxis5'] = dict(
+            title = 'Rolling Beta',
+            titlefont = dict(size = 11),
+            anchor = 'x',
+            rangemode = 'tozero',
+            zeroline = True
+            )
+        # add data
+        self.fig['data'].append(
+            go.Scatter(
+                name = 'Rolling Beta',
+                x = self.Rolling_Beta.index,
+                y = self.Rolling_Beta,
+                yaxis = 'y5',
+                fill = 'tozeroy',
+                line = dict(color = self.corr_color),
+                showlegend = False
+                )
+            )
+        
+        if self.help :
+            # add High and low Markers
+            new_annotation = spread._generate_new_annotation(yaxis = 'y5')
+            # High
+            new_annotation.update(
+                dict(
+                    x = self.Rolling_Beta[self.Rolling_Beta == self.Rolling_Beta.max()].index[0],
+                    y = self.Rolling_Beta.max(),
+                    text = 'High:%.2f' % (self.Rolling_Beta.max()),
+                    ay = -20
+                    )
+                )
+            self.fig['layout']['annotations'].append(new_annotation)
+            new_annotation = spread._generate_new_annotation(yaxis = 'y5')
+            # Low
+            new_annotation.update(
+                dict(
+                    x = self.Rolling_Beta[self.Rolling_Beta == self.Rolling_Beta.min()].index[0],
+                    y = self.Rolling_Beta.min(),
+                    text = 'Low:%.2f' % (self.Rolling_Beta.min()),
+                    ay = 20
+                    )
+                )
+            self.fig['layout']['annotations'].append(new_annotation)
+
+    def _generate_beta_dist(self) :
+        self.fig['layout']['xaxis7'] = dict(anchor = 'y5')
+        
+        self.fig['data'].append(
+            go.Histogram(
+                y = self.Rolling_Beta, # not times StartValue, it's to make into percentage
+                xaxis = 'x7',
+                yaxis = 'y5',
+                opacity = 0.5,
+                marker = dict(color= self.corr_color),
+                showlegend = False,
+                name = 'Beta Dist'
+                )
+            )
+    
+
+    def _generate_spread_regression(self):
+        t1, t2 = self.Ticker1, self.Ticker2
+
+        # 1) Build wide 2-col returns and drop rows with NaNs
+        ret_wide = (self.prices['Return']
+                    .unstack(0)
+                    .reindex(columns=[t1, t2])
+                    .dropna())
+
+        # 2) If not enough data, skip regression safely
+        if len(ret_wide) < 2:
+            # scatter cloud (if any)
+            if len(ret_wide) >= 1:
+                self.fig['data'].append(
+                    go.Scatter(
+                        x=ret_wide[t1] * 100.0,
+                        y=ret_wide[t2] * 100.0,
+                        name='Regression dot',
+                        yaxis='y6', xaxis='x2',
+                        showlegend=False, opacity=0.8,
+                        mode='markers',
+                        marker=dict(size=5, color=self.corr_color,
+                                    line=dict(color='rgb(0,0,0)', width=0.5))
+                    )
+                )
+
+            # annotate and set defaults
+            self.regression = dict(slope=float('nan'), intercept=float('nan'),
+                                   r_value=float('nan'), p_value=float('nan'),
+                                   std_err=float('nan'))
+            # axes (still configure)
+            self.fig['layout']['xaxis2'] = dict(anchor='y6',
+                                                title=f'{t1} - Return',
+                                                ticksuffix='%')
+            self.fig['layout']['yaxis6'] = dict(title=f'{t2} - Return',
+                                                anchor='x2', ticksuffix='%')
+            # optional: add a small note
+            self.fig['layout']['annotations'].append(dict(
+                xref='paper', yref='paper', x=0.82, y=0.22,
+                text='Not enough overlapping<br>return points for regression',
+                showarrow=False, font=dict(size=10, color='rgb(148,103,189)')
+            ))
+            return
+
+        # 3) We have data. Plot dots.
+        self.fig['data'].append(
+            go.Scatter(
+                x=ret_wide[t1] * 100.0,
+                y=ret_wide[t2] * 100.0,
+                name='Regression dot',
+                yaxis='y6', xaxis='x2',
+                showlegend=False, opacity=0.8,
+                mode='markers',
+                marker=dict(size=5, color=self.corr_color,
+                            line=dict(color='rgb(0,0,0)', width=0.5))
+            )
+        )
+
+        # 4) Regress (SciPy needs arrays)
+        from scipy import stats
+        x_vec = ret_wide[t1].values * 100.0
+        y_vec = ret_wide[t2].values * 100.0
+        slope, intercept, r_value, p_value, std_err = stats.linregress(x_vec, y_vec)
+        self.regression = dict(slope=slope, intercept=intercept,
+                               r_value=r_value, p_value=p_value, std_err=std_err)
+
+        # 5) Fitted line over the observed X range
+        line_x = np.linspace(x_vec.min(), x_vec.max(), 200)
+        line_y = slope * line_x + intercept
+        self.fig['data'].append(
+            go.Scatter(
+                x=line_x, y=line_y,
+                name='Regression line',
+                yaxis='y6', xaxis='x2',
+                showlegend=False, mode='lines',
+                line=dict(color='rgb(255,165,0)')
+            )
+        )
+
+        # 6) Axes
+        self.fig['layout']['xaxis2'] = dict(anchor='y6',
+                                            title=f'{t1} - Return',
+                                            ticksuffix='%')
+        self.fig['layout']['yaxis6'] = dict(title=f'{t2} - Return',
+                                            anchor='x2', ticksuffix='%')
+
+
+    def _generate_spread_regression_describe(self) :
+        self.fig['layout']['xaxis8'] = dict(
+            visible = False,
+            autorange = False,
+            fixedrange = True,
+            zeroline = False
+            )
+        self.fig['layout']['yaxis8'] = dict(
+            anchor = 'x3',
+            visible = False,
+            autorange = False,
+            fixedrange = True,
+            zeroline = False,
+            range = [-1, 1]
+            )
+        
+        keys = ['slope', 'intercept', 'r_square', 'p_value', 'std_err']
+        self.regression['r_square'] = self.regression['r_value'] **2
+        new_annotation = dict(
+            yref = 'y8',
+            x = 0, y = 0,
+            showarrow = False,
+            xref = 'x8',
+            text = '<b>Raw Beta</b>    %.2f<br><b>Alpha(Intercept)</b>    %.2f<br><b>Coefficient<sup>2</sup>(r<sup>2</sup>)</b>     %.2f<br><b>p-value(2-sided)</b>     %.2f<br><b>Std Error</b>     %.2f' % tuple([ self.regression[k] for k in keys]),
+            )
+        self.fig['layout']['annotations'].append(new_annotation)
+
+    
+
+    def _generate_new_annotation(yaxis) :
+        return dict(
+            xref = 'x',
+            yref = yaxis,
+            showarrow = True,
+            arrowhead = 2,
+            arrowsize = 1,
+            arrowwidth = 0.8,
+            font = dict(
+                size = 10, 
+                color = 'rgb(148, 103, 189)'
+                )
+            )
+            
+            
+    def _define_yaxis_domain(self) :
+        # plotting area is the whole area minus the gaps between each plot, which is 25-px
+        # main domain is the 5/18 of the whole plotting domain
+        each_domain_main = (self.height - (25*5)) /6 /self.height /3*5
+        # sub domain is the 1/9 of the whole plotting domain
+        each_domain_sub = each_domain_main /2.5
+        gap_domain = 25 / self.height
+        
+        yaxis_domain = [0, each_domain_sub,  # plot 6
+                        each_domain_sub + gap_domain, each_domain_sub*2 + gap_domain,  # plot 5
+                        each_domain_sub*2 + gap_domain*2, each_domain_sub*3 + gap_domain*2, # plot 4
+                        each_domain_sub*3 + gap_domain*3, each_domain_sub*4 + gap_domain*3, # plot 3
+                        1 - each_domain_main*2 - gap_domain, 1 - each_domain_main - gap_domain, # plot 2
+                        1-each_domain_main, 1 # plot 1
+                        ]
+        # Spread value
+        self.fig['layout']['yaxis']['domain'] = yaxis_domain[10:12]
+        # Spread Norm
+        self.fig['layout']['yaxis2']['domain'] = yaxis_domain[8:10]
+        # Rolling Relative Vol
+        self.fig['layout']['yaxis3']['domain'] = yaxis_domain[6:8]
+        # Corr
+        self.fig['layout']['yaxis4']['domain']= yaxis_domain[4:6]
+        # Rolling Beta
+        self.fig['layout']['yaxis5']['domain']= yaxis_domain[2:4]
+        # Regression
+        self.fig['layout']['yaxis6']['domain']= yaxis_domain[0:2]
+        # Spread Value's describe
+        self.fig['layout']['yaxis7']['domain']= self.fig['layout']['yaxis']['domain']
+        # Regression's describe
+        self.fig['layout']['yaxis8']['domain']= self.fig['layout']['yaxis6']['domain']
+        
+    def _define_xaxis_domain(self) :
+        right_domain = [0.9, 1]
+        # plot 1-3
+        self.fig['layout']['xaxis']['domain'] = [0, 0.885]
+        # plot 4
+        self.fig['layout']['xaxis2']['domain']= [0, 0.8]
+        # plot 1 describe
+        self.fig['layout']['xaxis3']['domain']= right_domain
+        # plot 2 dist - norm
+        self.fig['layout']['xaxis4']['domain']= right_domain
+        # plot 3 dist - vol
+        self.fig['layout']['xaxis5']['domain']= right_domain
+        # plot 4 dist - corr
+        self.fig['layout']['xaxis6']['domain']= right_domain
+        # plot 5 dist - beta
+        self.fig['layout']['xaxis7']['domain']= right_domain
+        # plot 6 describe
+        self.fig['layout']['xaxis8']['domain']= right_domain
